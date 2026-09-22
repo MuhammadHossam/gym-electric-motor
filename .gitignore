@@ -35,3 +35,6 @@ saved_plots/
 
 # debug files
 */debug.ipynb
+
+# Images
+*.png

@@ -119,13 +119,13 @@ class TorqueToCurrentConversion:
                     else:
                         i_d = i_d_(i_q, t)
 
-                # Different current vectors are determined for each torque and the smallest magnitude is selected
-                i = np.power(i_d, 2) + np.power(i_q, 2)
-                min_idx = np.where(i == np.amin(i))[0][0]
                 if self.l_d == self.l_q:
                     i_q_ret = i_q
                     i_d_ret = i_d
                 else:
+                    # Different current vectors are determined for each torque and the smallest magnitude is selected
+                    i = np.power(i_d, 2) + np.power(i_q, 2)
+                    min_idx = np.where(i == np.amin(i))[0][0]
                     i_q_ret = np.sign((self.l_q - self.l_d) * t) * np.abs(i_q[min_idx])
                     i_d_ret = i_d[min_idx]
 
@@ -295,8 +295,8 @@ class TorqueToCurrentConversion:
         elif torque_control == "interpolate":
             # Interpolate the torque and flux to get lists for the optimal currents
             self.t_grid, self.psi_grid = np.mgrid[
-                np.amin(t) : np.amax(t) : np.complex(0, self.t_count),
-                self.psi_min : self.psi_max : np.complex(self.psi_count),
+                np.amin(t) : np.amax(t) : complex(0, self.t_count),
+                self.psi_min : self.psi_max : complex(0, self.psi_count),
             ]
             self.i_q_inter = griddata(
                 (t, psi), i_q, (self.t_grid, self.psi_grid), method="linear"
@@ -339,7 +339,7 @@ class TorqueToCurrentConversion:
             )
 
             # Define the plot for the current characteristics
-            self.i_d_q_characteristic_.set_title("$i_\mathrm{d,q_{ref}}$")
+            self.i_d_q_characteristic_.set_title(r"$i_\mathrm{d,q_{ref}}$")
             self.i_d_q_characteristic_.plot(
                 self.mtpc[mtpc_i_idx, 1][0],
                 self.mtpc[mtpc_i_idx, 2][0],
