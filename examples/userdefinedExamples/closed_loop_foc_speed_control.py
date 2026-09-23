@@ -58,29 +58,30 @@ def main():
     # 1. DC-LINK VOLTAGE / POWER SUPPLY SETTINGS / LIMITs 
     # =========================================================================
     # Nominal DC-link voltage U_dc [V]
-    p = 4               # Number of pole pairs 
-    Rs = 2.35           # Stator phase resistance [Ohm]
-    Ld = 8.4e-3         # Direct-axis inductance L_d [H]
-    Lq = 8.4e-3         # Quadrature-axis inductance L_q [H]
-    psi_p = 54e-3       # Permanent magnet flux linkage [Vs] (0 for SynRM)
+    p = 2               # Number of pole pairs 
+    Rs = 1.15           # Stator phase resistance [Ohm]
+    Ld = 18.5e-3         # Direct-axis inductance L_d [H]
+    Lq = 38e-3         # Quadrature-axis inductance L_q [H]
+    psi_p = 0.175       # Permanent magnet flux linkage [Vs] (0 for SynRM)
     j = 2.6e-3          # Rotor moment of inertia [kg*m^2]
     u_dc_link = 200.0  # Set your desired DC-link voltage in Volts
-    v_base = 230.94    # The base voltage (Max voltage measured by the ADC)
-    I_base = 10        # The base current (Max current measured by the ADC)
-    f_base = 200       # The base frequency (Max Limit)
-    p_base = 1.5 * v_base * I_base  # Base Power 
-    w_base = 2*np.pi*f_base   # The base angular electrical speed. 
-    wm_base = w_base/p # base mechanical angular speed.
+    
 
 
-    f_rated = 150      # The rated frequency 
-    I_rated = 5        # The rated current 
+    f_rated = 120      # The rated frequency 
+    I_rated = 9.2       # The rated current 
     w_rated = 2*np.pi*f_rated # Rated electrical angular speed.
     wm_rated = w_rated/p # Rated mechanical angular speed.
     v_rated = u_dc_link/np.sqrt(3) # Rated phase voltage
-
-    T_base = p_base/(w_base/p) # Base Torque. 
     T_rated = 1.5 * p * psi_p * I_rated # Rated Torque. 
+
+    v_base = v_rated    # The Maximum Limited voltage 
+    I_base = I_rated        # The Maximum limited current
+    f_base = 200       # The base frequency (Max Limit)
+    w_base = 2*np.pi*f_base   # The base angular electrical speed. 
+    wm_base = w_base/p # base mechanical angular speed.
+    T_base = T_rated  #p_base/(w_base/p) # Base Torque. 
+    
 
     
     # =========================================================================
@@ -154,7 +155,7 @@ def main():
     # without any other step ups or downs throughout the simulation.
     step_reference_generator = rg.ConstReferenceGenerator(
         reference_state="omega",
-        reference_value=0.5,
+        reference_value=0.15,
     )
 
     # =========================================================================
