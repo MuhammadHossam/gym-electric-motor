@@ -58,18 +58,18 @@ def main():
     # 1. DC-LINK VOLTAGE / POWER SUPPLY SETTINGS / LIMITs 
     # =========================================================================
     # Nominal DC-link voltage U_dc [V]
-    p = 2               # Number of pole pairs 
-    Rs = 1.15           # Stator phase resistance [Ohm]
-    Ld = 18.5e-3         # Direct-axis inductance L_d [H]
-    Lq = 38e-3         # Quadrature-axis inductance L_q [H]
-    psi_p = 0.175       # Permanent magnet flux linkage [Vs] (0 for SynRM)
+    p = 3#2               # Number of pole pairs 
+    Rs = 0.130185#1.15           # Stator phase resistance [Ohm]
+    Ld = 1.532e-3#18.5e-3         # Direct-axis inductance L_d [H]
+    Lq = 7.324e-3#38e-3         # Quadrature-axis inductance L_q [H]
+    psi_p = 0.2084#0.175       # Permanent magnet flux linkage [Vs] (0 for SynRM)
     j = 2.6e-3          # Rotor moment of inertia [kg*m^2]
     u_dc_link = 200.0  # Set your desired DC-link voltage in Volts
     
 
 
     f_rated = 120      # The rated frequency 
-    I_rated = 9.2       # The rated current 
+    I_rated = 10.0#9.2       # The rated current 
     w_rated = 2*np.pi*f_rated # Rated electrical angular speed.
     wm_rated = w_rated/p # Rated mechanical angular speed.
     v_rated = u_dc_link/np.sqrt(3) # Rated phase voltage
