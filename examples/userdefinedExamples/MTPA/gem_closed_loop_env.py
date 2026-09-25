@@ -75,6 +75,8 @@ from gym_electric_motor.envs.motors import ActionType, ControlType, Motor, Motor
 from gym_electric_motor.physical_systems.mechanical_loads import MechanicalLoad
 from classic_controllers import Controller
 
+from scipy.optimize import brentq
+
 from rl_kickoff_sacV2 import (
     P, LD, LQ, RS, PSI_NOM, T_REF, I_RATED, VDC, ALPHA_PSI_FERRITE, S,
     MAX_DELTA_BETA_DEG, N_WINDOW, CURRENT_NOISE_STD,
@@ -88,18 +90,86 @@ from rl_kickoff_sacV2 import (
 # =========================================================================
 ROTOR_J = 5e-5   # kg*m^2 -- PLACEHOLDER, see module docstring
 WE_RANGE = (100.0, 550.0)   # electrical speed range, rad/s (same as rl_kickoff_sac.py)
+LOAD_MARGIN = 0.8   # sampled load torque is capped at 80% of the voltage-limited
+                     # MTPA torque ceiling at that episode's speed -- keeps every
+                     # (omega_ref, t_load) pair physically achievable without
+                     # flux-weakening, which RLBetaTorqueToCurrent doesn't implement.
+
+
+def _mtpa_id_iq_for_torque(torque, psi_f):
+    """MTPA (id, iq) for a given torque and flux, nominal closed form (same
+    relation _baseline_beta0_deg uses). torque is assumed >= 0."""
+    A = psi_f / (2.0 * S)
+
+    def id_of_iq(iq):
+        return -A - np.sqrt(A ** 2 + iq ** 2)
+
+    def te_of_iq(iq):
+        return torque_eq(id_of_iq(iq), iq, psi_f)
+
+    iq = brentq(lambda x: te_of_iq(x) - torque, 1e-6, I_RATED, xtol=1e-8)
+    return id_of_iq(iq), iq
+
+
+def _mtpa_voltage_mag(torque, we, psi_f):
+    """Steady-state voltage magnitude needed to hold `torque` at MTPA at
+    electrical speed `we`, including the Rs drop (same relations
+    modulation_control() in the real TorqueToCurrentConversion is built on)."""
+    id_, iq_ = _mtpa_id_iq_for_torque(torque, psi_f)
+    vd = RS * id_ - we * LQ * iq_
+    vq = RS * iq_ + we * (LD * id_ + psi_f)
+    return float(np.hypot(vd, vq))
+
+
+def max_voltage_limited_torque(we, psi_f, margin=1.0):
+    """Largest MTPA torque achievable at electrical speed `we` without the
+    required voltage exceeding the space-vector limit (VDC/sqrt(3), i.e.
+    modulation index a_max = 2/sqrt(3)). At low speed this is just the
+    current-rated ceiling (not voltage-limited yet); at higher speed it's
+    found by bisection. `margin` < 1 shrinks the returned ceiling for
+    headroom (e.g. 0.8 -> 80%)."""
+    v_max = VDC / np.sqrt(3.0)
+    A = psi_f / (2.0 * S)
+    id_at_rated = -A - np.sqrt(A ** 2 + I_RATED ** 2)
+    t_hi = torque_eq(id_at_rated, I_RATED, psi_f)   # current-limited ceiling
+
+    if _mtpa_voltage_mag(t_hi, we, psi_f) <= v_max:
+        t_max = t_hi   # not voltage-limited at this speed
+    else:
+        t_max = brentq(lambda T: _mtpa_voltage_mag(T, we, psi_f) - v_max,
+                        1e-6, t_hi, xtol=1e-6)
+    return margin * t_max
 
 RL_DECISION_EVERY_N_TAU = 10   # RL acts once per 10 tau cycles (100us*10=1ms)
 TAU = 1e-4                      # 100 microseconds, same as your scripts
-EPISODE_DURATION_S = 10        # simulated seconds per RL "episode"
+EPISODE_DURATION_S = 0.5        # simulated seconds per RL "episode"
 N_TAU_STEPS_PER_EPISODE = int(EPISODE_DURATION_S / TAU)
 N_RL_DECISIONS_PER_EPISODE = N_TAU_STEPS_PER_EPISODE // RL_DECISION_EVERY_N_TAU
 
+# Settling gate (reset() burn-in, see _burn_in_until_settled): the physical
+# loop can take close to 1s to settle (observed in diagnose_gem_closed_loop.py),
+# longer than EPISODE_DURATION_S itself -- without this, most training
+# transitions would be transient response (which RL doesn't control anyway;
+# that's the PI cascade's job), not the steady-state operating point beta-
+# correction is meant to address. reset() runs with delta_beta frozen at 0
+# (baseline MTPA) until omega stays within SETTLE_OMEGA_TOL of omega_ref for
+# SETTLE_HOLD_S continuously, or gives up after SETTLE_TIMEOUT_S and starts
+# the episode anyway (some sampled load/speed/temperature combinations are
+# legitimately hard and settle slowly or not cleanly -- we don't want to
+# silently filter those out of training).
+SETTLE_OMEGA_TOL = 0.05     # |omega - omega_ref| / |omega_ref| must stay below this...
+SETTLE_HOLD_S = 0.5         # ...continuously for this long...
+SETTLE_TIMEOUT_S = 2.0      # ...within this much burn-in time, else start anyway.
+
 
 class ConfigurableLoad(MechanicalLoad):
-    """Minimal constant-torque + viscous-friction load -- same shape as
-    your ConfigurableStepLoad, without the step (we don't need a
-    disturbance step for RL training, just a plausible steady load)."""
+    """Minimal constant-torque (per episode) + viscous-friction load --
+    same shape as your ConfigurableStepLoad, without the step. `t_load` is
+    set fresh each episode in PMSMGemClosedLoopEnv.reset() (sampled with
+    the speed for that episode, capped by max_voltage_limited_torque so
+    torque and speed are never both requested beyond what the voltage
+    limit allows) -- the constructor default below is just the initial
+    value before the first reset()."""
 
     def __init__(self, j_load=0.0, t_load=0.3, viscous_friction=1e-4, **kwargs):
         super().__init__(j_load=j_load, **kwargs)
@@ -277,6 +347,9 @@ class PMSMGemClosedLoopEnv(gym.Env):
         self._T_true = None
         self._state = None
         self._reference = None
+        self._settled_ok = None   # set each reset() -- True if the burn-in settling
+                                   # gate converged, False if it timed out and the
+                                   # episode started anyway (see _burn_in_until_settled)
 
     def _predict_fn(self, obs):
         # called from inside RLBetaTorqueToCurrent.control() -- returns
@@ -374,8 +447,16 @@ class PMSMGemClosedLoopEnv(gym.Env):
         self.limits = ps.limits
         self.omega_idx = self.state_names.index("omega")
         self.torque_idx = self.state_names.index("torque")
+        self.wm_base = wm_base   # mechanical rad/s -- needed in reset() to
+                                  # convert omega_ref (pu) to electrical we
+                                  # for the voltage-limited load sampling
 
     def reset(self, *, seed=None, options=None):
+        """options={"skip_burn_in": True} bypasses the settling burn-in
+        (see _burn_in_until_settled) and returns right after the episode's
+        T_true/omega_ref/t_load are sampled -- useful for diagnostics that
+        want to see the raw startup transient, like
+        diagnose_gem_closed_loop.py. Training should NOT pass this."""
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
@@ -389,28 +470,38 @@ class PMSMGemClosedLoopEnv(gym.Env):
         omega_ref = self.rng.uniform(*self.omega_ref_range)
         self._omega_ref_gen._reference_value = omega_ref
 
+        # Sample this episode's load torque coupled to its speed: torque
+        # and speed can't both be high without flux-weakening (which
+        # RLBetaTorqueToCurrent doesn't implement), so cap t_load at
+        # LOAD_MARGIN (80%) of the voltage-limited MTPA ceiling at this
+        # speed and true flux -- every sampled pair stays achievable.
+        we = omega_ref * self.wm_base * P
+        t_load_max = max_voltage_limited_torque(we, psi_true, margin=LOAD_MARGIN)
+        t_load = self.rng.uniform(0.0, max(t_load_max, 1e-6))
+        self._load.t_load = t_load
+
         (state, reference), _ = self.env.reset()
         self.controller.reset()
         self.torque_block.reset()
         self._state, self._reference = state, reference
         self._decision_count = 0
 
-        # run one RL-decision worth of cycles with a neutral (zero) action
-        # just to populate the sensor window before the first real action
-        self._pending_action = np.array([0.0], dtype=np.float32)
-        obs = self._run_cycles(RL_DECISION_EVERY_N_TAU)
+        if options and options.get("skip_burn_in"):
+            self._settled_ok = None
+            self._pending_action = np.array([0.0], dtype=np.float32)
+            return self._build_obs_from_window(), {}
+
+        # Burn in with delta_beta frozen at 0 (baseline MTPA) until the
+        # loop actually settles, so the episode SAC trains on starts from
+        # a real steady-state operating point instead of mid-transient.
+        self._settled_ok = self._burn_in_until_settled()
+
+        obs = self._build_obs_from_window()
         return obs, {}
 
-    def _run_cycles(self, n_cycles):
-        obs = None
-        for _ in range(n_cycles):
-            action = self.controller.control(self._state, self._reference)
-            (self._state, self._reference), _, terminated, truncated, _ = self.env.step(action)
-            if terminated or truncated:
-                (self._state, self._reference), _ = self.env.reset()
-                self.controller.reset()
-        # rebuild the observation the same way RLBetaTorqueToCurrent does,
-        # from whatever window it has accumulated
+    def _build_obs_from_window(self):
+        # observation the same way RLBetaTorqueToCurrent does, from
+        # whatever window it has accumulated
         we = self._state[self.omega_idx] * self.limits[self.omega_idx] * P
         window_flat = []
         w = self.torque_block._window
@@ -419,8 +510,46 @@ class PMSMGemClosedLoopEnv(gym.Env):
         for vd_n, vq_n, id_n, iq_n in w[-N_WINDOW:]:
             window_flat.extend([vd_n, vq_n, id_n, iq_n])
         Te_target = self.torque_block.last_torque_target
-        obs = np.array([Te_target, we, VDC] + window_flat, dtype=np.float32)
-        return obs
+        return np.array([Te_target, we, VDC] + window_flat, dtype=np.float32)
+
+    def _burn_in_until_settled(self):
+        """Step the closed loop tau-by-tau with delta_beta frozen at 0
+        (same baseline-MTPA behavior as diagnose_gem_closed_loop.py) until
+        omega stays within SETTLE_OMEGA_TOL of omega_ref for SETTLE_HOLD_S
+        continuously, or SETTLE_TIMEOUT_S of burn-in time elapses first
+        (in which case we give up and start the episode anyway). Returns
+        True if it settled, False if it timed out."""
+        self._pending_action = np.array([0.0], dtype=np.float32)
+        omega_ref_phys = self._omega_ref_gen._reference_value * self.wm_base
+
+        settled_for = 0.0
+        burned_in = 0.0
+        while burned_in < SETTLE_TIMEOUT_S:
+            action = self.controller.control(self._state, self._reference)
+            (self._state, self._reference), _, terminated, truncated, _ = self.env.step(action)
+            burned_in += TAU
+            if terminated or truncated:
+                (self._state, self._reference), _ = self.env.reset()
+                self.controller.reset()
+                self.torque_block.reset()
+                settled_for = 0.0
+                continue
+
+            omega_act = self._state[self.omega_idx] * self.limits[self.omega_idx]
+            rel_err = abs(omega_act - omega_ref_phys) / max(abs(omega_ref_phys), 1e-6)
+            settled_for = settled_for + TAU if rel_err < SETTLE_OMEGA_TOL else 0.0
+            if settled_for >= SETTLE_HOLD_S:
+                return True
+        return False
+
+    def _run_cycles(self, n_cycles):
+        for _ in range(n_cycles):
+            action = self.controller.control(self._state, self._reference)
+            (self._state, self._reference), _, terminated, truncated, _ = self.env.step(action)
+            if terminated or truncated:
+                (self._state, self._reference), _ = self.env.reset()
+                self.controller.reset()
+        return self._build_obs_from_window()
 
     def step(self, action):
         self._pending_action = action
@@ -450,5 +579,5 @@ class PMSMGemClosedLoopEnv(gym.Env):
 
         info = {"Te_actual": Te_actual, "Te_target": Te_target, "Is": Is_cmd,
                 "loss": loss, "T_true": self._T_true, "beta_deg": self.torque_block.last_beta_deg,
-                "id_cmd": id_cmd, "iq_cmd": iq_cmd}
+                "id_cmd": id_cmd, "iq_cmd": iq_cmd, "t_load": self._load.t_load}
         return obs, float(reward), terminated, truncated, info

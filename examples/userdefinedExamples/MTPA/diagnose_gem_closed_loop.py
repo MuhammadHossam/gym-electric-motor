@@ -41,7 +41,12 @@ from gem_closed_loop_env import PMSMGemClosedLoopEnv, TAU, VDC
 
 def main():
     env = PMSMGemClosedLoopEnv(seed=0)
-    obs, info = env.reset(seed=1)
+    # skip_burn_in=True: reset() now settles the loop internally (see
+    # gem_closed_loop_env.py's _burn_in_until_settled) before returning, so
+    # without this flag we'd only ever see the already-settled state here.
+    # This diagnostic is specifically for looking at the raw transient, so
+    # bypass it.
+    obs, info = env.reset(seed=1, options={"skip_burn_in": True})
     print(f"T_true = {env._T_true:.1f} C")
     print(f"omega_ref (per-unit) = {env._omega_ref_gen._reference_value:.3f}")
 
@@ -75,11 +80,28 @@ def main():
 
     a_max = 2.0 / np.sqrt(3)
 
+    reset_count = 0
     state, reference = env._state, env._reference
     for k in range(N_STEPS):
         action = env.controller.control(state, reference)
         (state, reference), _, terminated, truncated, _ = env.env.step(action)
         if terminated or truncated:
+            reset_count += 1
+            if reset_count <= 5:   # only print the first few, otherwise it floods
+                # figure out which state(s) actually tripped the limit --
+                # GEM's state_space is normalized, so anything with
+                # |value| >= ~1.0 (relative to its own limit) is a hit.
+                over = []
+                for i, name in enumerate(state_names):
+                    lim = limits[i]
+                    if lim == 0:
+                        continue
+                    frac = state[i]   # state IS already normalized (per-unit)
+                    if abs(frac) >= 0.98:
+                        over.append(f"{name}={frac:.3f} (={state[i]*lim:.3f} physical, limit={lim:.3f})")
+                print(f"  [reset #{reset_count} at step {k}, t={k*TAU*1000:.2f}ms] "
+                      f"terminated={terminated} truncated={truncated}  "
+                      f"near/over-limit states: {over if over else '(none found >=0.98 -- check truncated/other cause)'}")
             (state, reference), _ = env.env.reset()
             env.controller.reset()
 
@@ -242,6 +264,10 @@ def main():
     print(f"saved {html_path}")
 
     # printed summary too, in case the image is hard to eyeball precisely
+    print(f"\ntotal resets (terminated/truncated) during this run: {reset_count} "
+          f"out of {N_STEPS} steps"
+          + ("  <-- env is resetting repeatedly, see the per-reset prints above"
+             if reset_count > 5 else ""))
     last = slice(-500, None)   # last 50ms
     print(f"\nlast 50ms summary:")
     print(f"  omega:  actual={np.mean(omega_act[last])*rads_to_rpm:8.1f} RPM   "
