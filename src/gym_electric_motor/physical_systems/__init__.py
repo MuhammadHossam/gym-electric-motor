@@ -32,6 +32,7 @@ from .electric_motors import (
     ElectricMotor,
     ExternallyExcitedSynchronousMotor,
     PermanentMagnetSynchronousMotor,
+    SaturatedThermalPMSM,
     SquirrelCageInductionMotor,
     SynchronousReluctanceMotor,
     ThreePhaseMotor,

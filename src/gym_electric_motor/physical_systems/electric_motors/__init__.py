@@ -13,6 +13,7 @@ from .externally_excited_synchronous_motor import ExternallyExcitedSynchronousMo
 # Induction Motors
 from .induction_motor import InductionMotor
 from .permanent_magnet_synchronous_motor import PermanentMagnetSynchronousMotor
+from .saturated_thermal_pmsm import SaturatedThermalPMSM
 from .squirrel_cage_induction_motor import SquirrelCageInductionMotor
 
 # Synchronous Motors
