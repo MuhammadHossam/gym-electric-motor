@@ -484,13 +484,18 @@ class SynchronousMotorSystem(ThreePhaseMotorSystem):
         self.U_SUP_IDX = list(range(self.EPSILON_IDX + 1, self.EPSILON_IDX + 1 + self._supply.voltage_len))
         self._ode_epsilon_idx = self._motor_ode_idx[-1]
 
+    def _terminal_currents(self, ode_state):
+        """Currents at the machine terminals [i_sd, i_sq]; differ from the ODE state if the motor has a core-loss branch."""
+        motor = self._electrical_motor
+        return motor.terminal_currents(motor.i_in(ode_state[self._ode_currents_idx]), ode_state[self._omega_ode_idx])
+
     def simulate(self, action, *_, **__):
         # Docstring of superclass
         ode_state = self._ode_solver.y
         eps = ode_state[self._ode_epsilon_idx]
         if self.control_space == "dq":
             action = self.dq_to_abc_space(action, eps)
-        i_in = self.dq_to_abc_space(self._electrical_motor.i_in(ode_state[self._ode_currents_idx]), eps)
+        i_in = self.dq_to_abc_space(self._terminal_currents(ode_state), eps)
         switching_times = self._converter.set_action(action, self._t)
 
         for t in switching_times[:-1]:
@@ -502,7 +507,7 @@ class SynchronousMotorSystem(ThreePhaseMotorSystem):
             self._ode_solver.set_f_params(u_dq)
             ode_state = self._ode_solver.integrate(t)
             eps = ode_state[self._ode_epsilon_idx]
-            i_in = self.dq_to_abc_space(self._electrical_motor.i_in(ode_state[self._ode_currents_idx]), eps)
+            i_in = self.dq_to_abc_space(self._terminal_currents(ode_state), eps)
 
         i_sup = self._converter.i_sup(i_in)
         u_sup = self._supply.get_voltage(self._t, i_sup)
@@ -515,7 +520,7 @@ class SynchronousMotorSystem(ThreePhaseMotorSystem):
         self._k += 1
         torque = self._electrical_motor.torque(ode_state[self._motor_ode_idx])
         mechanical_state = ode_state[self._load_ode_idx]
-        i_dq = ode_state[self._ode_currents_idx]
+        i_dq = self._terminal_currents(ode_state)
         i_abc = list(self.dq_to_abc_space(i_dq, eps))
         eps = ode_state[self._ode_epsilon_idx] % (2 * np.pi)
         if eps > np.pi:
@@ -540,7 +545,7 @@ class SynchronousMotorSystem(ThreePhaseMotorSystem):
         u_abc = self.converter.reset()
         u_abc = [u * u_s for u in u_abc for u_s in u_sup]
         u_dq = self.abc_to_dq_space(u_abc, eps)
-        i_dq = ode_state[self._ode_currents_idx]
+        i_dq = self._terminal_currents(ode_state)
         i_abc = self.dq_to_abc_space(i_dq, eps)
         torque = self.electrical_motor.torque(motor_state)
         self._t = 0

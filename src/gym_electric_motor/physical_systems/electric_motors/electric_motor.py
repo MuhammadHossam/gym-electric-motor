@@ -284,6 +284,17 @@ class ElectricMotor(RandomComponent):
         else:
             return np.zeros(len(self.CURRENTS))
 
+    def terminal_currents(self, currents, omega):
+        """
+        Currents at the machine terminals, as seen by sensors and the converter. Identical to the ODE currents
+        unless the motor model has a branch (e.g. core loss) that carries current outside the ODE state.
+
+        Args:
+            currents(ndarray(float)): ``i_in`` of the ODE state
+            omega(float): mechanical angular velocity [rad/s]
+        """
+        return currents
+
     def i_in(self, state):
         """
         Args:
